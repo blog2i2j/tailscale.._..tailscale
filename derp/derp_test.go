@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unique"
 
 	"go4.org/mem"
 	"golang.org/x/time/rate"
@@ -853,7 +854,7 @@ type channelFwd struct {
 }
 
 func (f channelFwd) String() string { return "" }
-func (f channelFwd) ForwardPacket(_ key.NodePublic, _ key.NodePublic, packet []byte) error {
+func (f channelFwd) ForwardPacket(_ unique.Handle[key.NodePublic], _ unique.Handle[key.NodePublic], packet []byte) error {
 	f.c <- packet
 	return nil
 }
