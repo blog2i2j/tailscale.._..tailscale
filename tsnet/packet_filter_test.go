@@ -24,7 +24,6 @@ import (
 // appropriate timeout set.
 func waitFor(t testing.TB, ctx context.Context, s *Server, f func(*netmap.NetworkMap) bool) error {
 	t.Helper()
-	t.Log("starting waitFor")
 	watcher, err := s.localClient.WatchIPNBus(ctx, ipn.NotifyInitialNetMap)
 	if err != nil {
 		t.Fatalf("error watching IPN bus: %s", err)
@@ -61,18 +60,18 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		initialNetMap   *tailcfg.MapResponse
-		initialWaitTest func(*netmap.NetworkMap) bool
+		name        string
+		mapResponse *tailcfg.MapResponse
+		waitTest    func(*netmap.NetworkMap) bool
 
-		incrementalNetMap   *tailcfg.MapResponse          // optional
-		incrementalWaitTest func(*netmap.NetworkMap) bool // optional
+		incrementalMapResponse *tailcfg.MapResponse          // optional
+		incrementalWaitTest    func(*netmap.NetworkMap) bool // optional
 
 		checks []check
 	}{
 		{
 			name: "IP_based_peers",
-			initialNetMap: &tailcfg.MapResponse{
+			mapResponse: &tailcfg.MapResponse{
 				Node: &tailcfg.Node{
 					Addresses: []netip.Prefix{netip.MustParsePrefix("1.1.1.1/32")},
 				},
@@ -95,7 +94,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 					IPProto: []int{int(ipproto.TCP)},
 				}},
 			},
-			initialWaitTest: func(nm *netmap.NetworkMap) bool {
+			waitTest: func(nm *netmap.NetworkMap) bool {
 				return len(nm.Peers) > 0
 			},
 			checks: []check{
@@ -107,7 +106,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 		},
 		{
 			name: "capmap_based_peers",
-			initialNetMap: &tailcfg.MapResponse{
+			mapResponse: &tailcfg.MapResponse{
 				Node: &tailcfg.Node{
 					Addresses: []netip.Prefix{netip.MustParsePrefix("1.1.1.1/32")},
 				},
@@ -130,7 +129,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 					IPProto: []int{int(ipproto.TCP)},
 				}},
 			},
-			initialWaitTest: func(nm *netmap.NetworkMap) bool {
+			waitTest: func(nm *netmap.NetworkMap) bool {
 				return len(nm.Peers) > 0
 			},
 			checks: []check{
@@ -142,7 +141,7 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 		},
 		{
 			name: "capmap_based_peers_changed",
-			initialNetMap: &tailcfg.MapResponse{
+			mapResponse: &tailcfg.MapResponse{
 				Node: &tailcfg.Node{
 					Addresses: []netip.Prefix{netip.MustParsePrefix("1.1.1.1/32")},
 					CapMap:    tailcfg.NodeCapMap{"X-sigil": nil},
@@ -159,10 +158,10 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 					IPProto: []int{int(ipproto.TCP)},
 				}},
 			},
-			initialWaitTest: func(nm *netmap.NetworkMap) bool {
+			waitTest: func(nm *netmap.NetworkMap) bool {
 				return nm.SelfNode.HasCap("X-sigil")
 			},
-			incrementalNetMap: &tailcfg.MapResponse{
+			incrementalMapResponse: &tailcfg.MapResponse{
 				PeersChanged: []*tailcfg.Node{{
 					ID:        2,
 					Name:      "foo",
@@ -191,44 +190,59 @@ func TestPacketFilterFromNetmap(t *testing.T) {
 			controlURL, c := startControl(t)
 			s, _, pubKey := startServer(t, ctx, controlURL, "node")
 
-			if test.initialWaitTest(s.lb.NetMap()) {
-				t.Fatal("initialWaitTest already passes before sending initial netmap: this will be flaky")
+			if test.waitTest(s.lb.NetMap()) {
+				t.Fatal("waitTest already passes before sending initial netmap: this will be flaky")
 			}
 
-			if !c.AddRawMapResponse(pubKey, test.initialNetMap) {
+			if !c.AddRawMapResponse(pubKey, test.mapResponse) {
 				t.Fatalf("could not send map response to %s", pubKey)
 			}
 
-			if err := waitFor(t, ctx, s, test.initialWaitTest); err != nil {
+			if err := waitFor(t, ctx, s, test.waitTest); err != nil {
 				t.Fatalf("waitFor: %s", err)
-			}
-
-			if test.incrementalNetMap != nil {
-				if test.incrementalWaitTest == nil {
-					t.Fatal("incrementalWaitTest must be set if incrementalNetMap is set")
-				}
-
-				if test.incrementalWaitTest(s.lb.NetMap()) {
-					t.Fatal("incrementalWaitTest already passes before sending incremental netmap: this will be flaky")
-				}
-
-				if !c.AddRawMapResponse(pubKey, test.incrementalNetMap) {
-					t.Fatalf("could not send map response to %s", pubKey)
-				}
-
-				if err := waitFor(t, ctx, s, test.incrementalWaitTest); err != nil {
-					t.Fatalf("waitFor: %s", err)
-				}
 			}
 
 			pf := s.lb.GetFilterForTest()
 
 			for _, check := range test.checks {
 				got := pf.Check(netip.MustParseAddr(check.src), netip.MustParseAddr(check.dst), check.port, ipproto.TCP)
-				if got != check.want {
-					t.Errorf("check %s -> %s:%d, got: %s, want: %s", check.src, check.dst, check.port, got, check.want)
+
+				want := check.want
+				if test.incrementalMapResponse != nil {
+					want = filter.Drop
+				}
+				if got != want {
+					t.Errorf("check %s -> %s:%d, got: %s, want: %s", check.src, check.dst, check.port, got, want)
 				}
 			}
+
+			if test.incrementalMapResponse != nil {
+				if test.incrementalWaitTest == nil {
+					t.Fatal("incrementalWaitTest must be set if incrementalMapResponse is set")
+				}
+
+				if test.incrementalWaitTest(s.lb.NetMap()) {
+					t.Fatal("incrementalWaitTest already passes before sending incremental netmap: this will be flaky")
+				}
+
+				if !c.AddRawMapResponse(pubKey, test.incrementalMapResponse) {
+					t.Fatalf("could not send map response to %s", pubKey)
+				}
+
+				if err := waitFor(t, ctx, s, test.incrementalWaitTest); err != nil {
+					t.Fatalf("waitFor: %s", err)
+				}
+
+				pf := s.lb.GetFilterForTest()
+
+				for _, check := range test.checks {
+					got := pf.Check(netip.MustParseAddr(check.src), netip.MustParseAddr(check.dst), check.port, ipproto.TCP)
+					if got != check.want {
+						t.Errorf("check %s -> %s:%d, got: %s, want: %s", check.src, check.dst, check.port, got, check.want)
+					}
+				}
+			}
+
 		})
 	}
 }
